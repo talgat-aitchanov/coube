@@ -1,0 +1,172 @@
+plugins {
+    id 'java'
+    id 'jacoco'
+    id 'org.springframework.boot' version '3.4.0'
+    id 'io.spring.dependency-management' version '1.1.6'
+}
+
+group = 'com.coube'
+version = '0.0.1-SNAPSHOT'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(17)
+    }
+}
+
+repositories {
+    mavenCentral()
+}
+
+def mapstructVersion = '1.6.3'
+def lombokVersion = '1.18.36'
+def lombokMapstructBindingVersion = '0.2.0'
+def springdocVersion = '2.7.0'
+def testcontainersVersion = '1.20.6'
+def archunitVersion = '1.3.0'
+def restAssuredVersion = '5.5.0'
+
+dependencies {
+    // Spring Boot
+    implementation 'org.springframework.boot:spring-boot-starter-web'
+    implementation 'org.springframework.boot:spring-boot-starter-validation'
+    implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
+    implementation 'org.springframework.boot:spring-boot-starter-actuator'
+
+    // Persistence
+    implementation 'org.flywaydb:flyway-core'
+    implementation 'org.flywaydb:flyway-database-postgresql'
+    runtimeOnly 'org.postgresql:postgresql'
+
+    // OpenAPI / Swagger
+    implementation "org.springdoc:springdoc-openapi-starter-webmvc-ui:${springdocVersion}"
+
+    // Micrometer / Prometheus / AOP for @Timed
+    implementation 'io.micrometer:micrometer-registry-prometheus'
+    implementation 'org.springframework.boot:spring-boot-starter-aop'
+
+    // MapStruct
+    implementation "org.mapstruct:mapstruct:${mapstructVersion}"
+    annotationProcessor "org.mapstruct:mapstruct-processor:${mapstructVersion}"
+
+    // Lombok
+    compileOnly "org.projectlombok:lombok:${lombokVersion}"
+    annotationProcessor "org.projectlombok:lombok:${lombokVersion}"
+    annotationProcessor "org.projectlombok:lombok-mapstruct-binding:${lombokMapstructBindingVersion}"
+    testCompileOnly "org.projectlombok:lombok:${lombokVersion}"
+    testAnnotationProcessor "org.projectlombok:lombok:${lombokVersion}"
+
+    // Tests
+    testImplementation 'org.springframework.boot:spring-boot-starter-test'
+    testImplementation 'org.springframework.boot:spring-boot-testcontainers'
+    testImplementation "org.testcontainers:postgresql:${testcontainersVersion}"
+    testImplementation "org.testcontainers:junit-jupiter:${testcontainersVersion}"
+    testImplementation "io.rest-assured:rest-assured:${restAssuredVersion}"
+    testImplementation "com.tngtech.archunit:archunit-junit5:${archunitVersion}"
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    options.compilerArgs << '-parameters'
+}
+
+def resolveDockerHost() {
+    def envValue = System.getenv('DOCKER_HOST')
+    if (envValue) return envValue
+
+    def os = System.getProperty('os.name').toLowerCase(Locale.ROOT)
+    if (os.contains('mac')) {
+        def home = System.getProperty('user.home')
+        def rawSocket = file("${home}/Library/Containers/com.docker.docker/Data/docker.raw.sock")
+        def cliSocket = file("${home}/.docker/run/docker.sock")
+        if (rawSocket.exists()) return "unix://${rawSocket.absolutePath}"
+        if (cliSocket.exists()) return "unix://${cliSocket.absolutePath}"
+    } else if (os.contains('linux')) {
+        def linuxSocket = file('/var/run/docker.sock')
+        if (linuxSocket.exists()) return "unix:///var/run/docker.sock"
+    }
+    return null
+}
+
+def configureLogging(Test t) {
+    t.useJUnitPlatform()
+    t.testLogging {
+        events 'passed', 'skipped', 'failed'
+        exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+    }
+}
+
+def configureDocker(Test t) {
+    def dockerHost = resolveDockerHost()
+    if (dockerHost != null) {
+        t.environment 'DOCKER_HOST', dockerHost
+        t.systemProperty 'docker.host', dockerHost
+    }
+    t.environment 'DOCKER_API_VERSION', '1.43'
+    t.systemProperty 'api.version', '1.43'
+    t.environment 'TESTCONTAINERS_RYUK_DISABLED', 'true'
+}
+
+tasks.named('test', Test) {
+    filter {
+        includeTestsMatching '*UnitTest'
+    }
+    configureLogging(it)
+}
+
+tasks.register('integrationTest', Test) {
+    description = 'Runs integration tests.'
+    group = 'verification'
+    testClassesDirs = sourceSets.test.output.classesDirs
+    classpath = sourceSets.test.runtimeClasspath
+    filter {
+        includeTestsMatching '*IntegrationTest'
+    }
+    configureLogging(it)
+    configureDocker(it)
+    shouldRunAfter tasks.named('test')
+}
+
+sourceSets {
+    e2eTest {
+        java.srcDir 'src/e2eTest/java'
+        resources.srcDir 'src/e2eTest/resources'
+        compileClasspath += sourceSets.main.output + sourceSets.test.output
+        runtimeClasspath += sourceSets.main.output + sourceSets.test.output
+    }
+}
+
+configurations {
+    e2eTestImplementation.extendsFrom testImplementation
+    e2eTestRuntimeOnly.extendsFrom testRuntimeOnly
+}
+
+tasks.register('e2eTest', Test) {
+    description = 'Runs end-to-end tests.'
+    group = 'verification'
+    testClassesDirs = sourceSets.e2eTest.output.classesDirs
+    classpath = sourceSets.e2eTest.runtimeClasspath
+    configureLogging(it)
+    configureDocker(it)
+    shouldRunAfter tasks.named('integrationTest')
+}
+
+// ─── JaCoCo coverage reports ────────────────────────────────────────────────
+jacoco {
+    toolVersion = '0.8.12'
+}
+
+tasks.register('jacocoCoverageReport', JacocoReport) {
+    dependsOn tasks.named('test'), tasks.named('integrationTest'), tasks.named('e2eTest')
+    executionData(fileTree(layout.buildDirectory.dir('jacoco')).include('**/*.exec'))
+    sourceDirectories.from(sourceSets.main.allJava.srcDirs)
+    classDirectories.from(sourceSets.main.output.classesDirs)
+    reports {
+        xml.required = true
+        html.required = true
+    }
+}
+
+tasks.named('check') {
+    dependsOn tasks.named('integrationTest'), tasks.named('e2eTest'), tasks.named('jacocoCoverageReport')
+}

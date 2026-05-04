@@ -1,0 +1,191 @@
+package com.coube.delivery.mapper;
+
+import com.coube.delivery.entity.CargoSurchargeEntity;
+import com.coube.delivery.entity.DeliveryCalculationEntity;
+import com.coube.delivery.entity.TariffConfigEntity;
+import com.coube.delivery.model.CargoType;
+import com.coube.delivery.model.Currency;
+import com.coube.delivery.model.DeliveryInput;
+import com.coube.delivery.model.PriceBreakdown;
+import com.coube.delivery.model.TariffRates;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+
+import java.math.BigDecimal;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
+
+import static org.assertj.core.api.BDDAssertions.then;
+
+class DeliveryEntityMapperUnitTest {
+
+    private final DeliveryEntityMapper mapper = new DeliveryEntityMapper() {};
+
+    @Test
+    @DisplayName("Maps id, baseRate, and urgentRate from TariffConfigEntity to TariffRates")
+    void toTariffRates_mapsRatesFromEntity() {
+        // given
+        Long id = 1L;
+        TariffConfigEntity entity = tariffEntity(id, "8.0000", "0.2000");
+
+        // when
+        TariffRates rates = mapper.toTariffRates(entity);
+
+        // then
+        then(rates.id()).isEqualTo(id);
+        then(rates.baseRate()).isEqualByComparingTo("8.0000");
+        then(rates.urgentRate()).isEqualByComparingTo("0.2000");
+    }
+
+    @Test
+    @DisplayName("Maps all three cargo surcharge rates into the cargoRates map with correct values")
+    void toTariffRates_includesAllThreeCargoSurchargesWithCorrectRates() {
+        // given
+        TariffConfigEntity entity = tariffEntity(2L, "8.0000", "0.2000");
+
+        // when
+        TariffRates rates = mapper.toTariffRates(entity);
+
+        // then
+        then(rates.cargoRates()).containsOnlyKeys(CargoType.FRAGILE, CargoType.OVERSIZED, CargoType.STANDARD);
+        then(rates.cargoRates().get(CargoType.FRAGILE)).isEqualByComparingTo("0.1000");
+        then(rates.cargoRates().get(CargoType.OVERSIZED)).isEqualByComparingTo("0.2500");
+        then(rates.cargoRates().get(CargoType.STANDARD)).isEqualByComparingTo("0.0000");
+    }
+
+    @Test
+    @DisplayName("Maps all input fields and breakdown prices into entity; calculated_at is left for the DB")
+    void toEntity_mapsAllInputAndBreakdownFieldsWithNullTimestamp() {
+        // given
+        Long tariffId = 1L;
+        DeliveryInput input = DeliveryInput.builder()
+                .distanceKm(bd("450"))
+                .weightTon(bd("12.5"))
+                .cargoType(CargoType.FRAGILE)
+                .urgent(true)
+                .build();
+        PriceBreakdown breakdown = PriceBreakdown.builder()
+                .basePrice(bd("45000.00"))
+                .urgentSurcharge(bd("9000.00"))
+                .cargoTypeSurcharge(bd("4500.00"))
+                .totalPrice(bd("58500.00"))
+                .currency(Currency.KZT)
+                .build();
+
+        // when
+        DeliveryCalculationEntity entity = mapper.toEntity(input, breakdown, tariffId);
+
+        // then
+        then(entity.getTariffId()).isEqualTo(tariffId);
+        then(entity.getDistanceKm()).isEqualByComparingTo("450");
+        then(entity.getWeightTon()).isEqualByComparingTo("12.5");
+        then(entity.getCargoType()).isEqualTo(CargoType.FRAGILE);
+        then(entity.isUrgent()).isTrue();
+        then(entity.getBasePrice()).isEqualByComparingTo("45000.00");
+        then(entity.getUrgentSurcharge()).isEqualByComparingTo("9000.00");
+        then(entity.getCargoTypeSurcharge()).isEqualByComparingTo("4500.00");
+        then(entity.getTotalPrice()).isEqualByComparingTo("58500.00");
+        then(entity.getCurrency()).isEqualTo(Currency.KZT);
+        // calculated_at is DB-generated (DEFAULT NOW()); mapper intentionally leaves it null
+        then(entity.getCalculatedAt()).isNull();
+    }
+
+    @Test
+    @DisplayName("Sets urgent=false and urgentSurcharge=0 when input is non-urgent STANDARD cargo")
+    void toEntity_setsNonUrgentFlagAndZeroUrgentSurcharge_whenInputIsNotUrgent() {
+        // given
+        DeliveryInput input = DeliveryInput.builder()
+                .distanceKm(bd("100"))
+                .weightTon(bd("5"))
+                .cargoType(CargoType.STANDARD)
+                .urgent(false)
+                .build();
+        PriceBreakdown breakdown = PriceBreakdown.builder()
+                .basePrice(bd("4000.00"))
+                .urgentSurcharge(bd("0.00"))
+                .cargoTypeSurcharge(bd("0.00"))
+                .totalPrice(bd("4000.00"))
+                .currency(Currency.KZT)
+                .build();
+
+        // when
+        DeliveryCalculationEntity entity = mapper.toEntity(input, breakdown, 1L);
+
+        // then
+        then(entity.isUrgent()).isFalse();
+        then(entity.getUrgentSurcharge()).isEqualByComparingTo("0.00");
+        then(entity.getCargoType()).isEqualTo(CargoType.STANDARD);
+    }
+
+    @Test
+    @DisplayName("Leaves entity id null before persistence — id is generated by the database")
+    void toEntity_leavesIdNull_beforePersistence() {
+        // given
+        DeliveryInput input = DeliveryInput.builder()
+                .distanceKm(bd("100"))
+                .weightTon(bd("5"))
+                .cargoType(CargoType.STANDARD)
+                .urgent(false)
+                .build();
+        PriceBreakdown breakdown = PriceBreakdown.builder()
+                .basePrice(bd("4000.00"))
+                .urgentSurcharge(bd("0.00"))
+                .cargoTypeSurcharge(bd("0.00"))
+                .totalPrice(bd("4000.00"))
+                .currency(Currency.KZT)
+                .build();
+
+        // when
+        DeliveryCalculationEntity entity = mapper.toEntity(input, breakdown, 1L);
+
+        // then
+        then(entity.getId()).isNull();
+    }
+
+    @Test
+    @DisplayName("Maps OVERSIZED cargo type and correct surcharge into entity")
+    void toEntity_mapsOversizedCargoType() {
+        // given
+        DeliveryInput input = DeliveryInput.builder()
+                .distanceKm(bd("200"))
+                .weightTon(bd("10"))
+                .cargoType(CargoType.OVERSIZED)
+                .urgent(false)
+                .build();
+        PriceBreakdown breakdown = PriceBreakdown.builder()
+                .basePrice(bd("16000.00"))
+                .urgentSurcharge(bd("0.00"))
+                .cargoTypeSurcharge(bd("4000.00"))
+                .totalPrice(bd("20000.00"))
+                .currency(Currency.KZT)
+                .build();
+
+        // when
+        DeliveryCalculationEntity entity = mapper.toEntity(input, breakdown, 1L);
+
+        // then
+        then(entity.getCargoType()).isEqualTo(CargoType.OVERSIZED);
+        then(entity.getCargoTypeSurcharge()).isEqualByComparingTo("4000.00");
+    }
+
+    private TariffConfigEntity tariffEntity(Long id, String baseRate, String urgentRate) {
+        TariffConfigEntity entity = TariffConfigEntity.builder()
+                .id(id)
+                .baseRate(bd(baseRate))
+                .urgentRate(bd(urgentRate))
+                .effectiveFrom(Instant.parse("2026-01-01T00:00:00Z"))
+                .surcharges(new ArrayList<>())
+                .build();
+        entity.getSurcharges().addAll(List.of(
+                CargoSurchargeEntity.builder().tariff(entity).cargoType(CargoType.FRAGILE).surchargeRate(bd("0.1000")).build(),
+                CargoSurchargeEntity.builder().tariff(entity).cargoType(CargoType.OVERSIZED).surchargeRate(bd("0.2500")).build(),
+                CargoSurchargeEntity.builder().tariff(entity).cargoType(CargoType.STANDARD).surchargeRate(bd("0.0000")).build()
+        ));
+        return entity;
+    }
+
+    private static BigDecimal bd(String s) {
+        return new BigDecimal(s);
+    }
+}
